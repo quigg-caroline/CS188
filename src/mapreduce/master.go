@@ -2,11 +2,12 @@ package mapreduce
 
 import "container/list"
 import "fmt"
-import "log"
 
 type WorkerInfo struct {
 	address string
 	// You can add definitions here.
+	failed bool
+	jobId int
 }
 
 
@@ -35,6 +36,11 @@ func min(a, b int) int {
     return b
 }
 
+func remove(slice []string, i int) []string {
+    return append(slice[:i], slice[i+1:]...)
+}
+
+
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
 	//listen for workers & then give them a job! 
@@ -42,68 +48,62 @@ func (mr *MapReduce) RunMaster() *list.List {
 
 	mapJob := 0
 	reduceJob := 0
-
 	for{
 		select {
 		// register new workers
 		case msg := <- mr.registerChannel:
 			// register channel address
-			worker := WorkerInfo {address: msg}
+			worker := WorkerInfo {address: msg, failed: false, jobId: -1}
 			mr.Workers[msg] = &worker
 			mr.AvailableWorkers =  append(mr.AvailableWorkers, msg)
-			log.Printf("logging worker... " + msg)
-		// map/reduce jobs have completed
-		default:
-			// if we have map jobs to do and available workers
-			if mapJob < mr.nMap-1 && len(mr.AvailableWorkers) > 0 {
-				jobs := min(mr.nMap - mapJob, len(mr.AvailableWorkers))
-				c := make(chan int, jobs)
-				for i :=0; i < jobs ; i++ {
-					go func(i int, startingJob int, c chan int){
-						// send RPC to job to do 
-						var reply DoJobReply
+			go func(msg string) { mr.jobChannel <- msg }(msg)
+		// worker is ready for a job
+		case msg := <- mr.jobChannel:
+			workerInfo := mr.Workers[msg]
+			if mapJob < mr.nMap {
+				go func (jobId int, worker *WorkerInfo){
+					// send RPC to job to do 
+					var reply DoJobReply
+					info := *worker
+					
+					args := DoJobArgs{mr.file, Map, jobId, mr.nReduce }
 
-						args := DoJobArgs{mr.file, Map, i + startingJob, mr.nReduce }
+					ok := call(info.address, "Worker.DoJob", args, &reply)
 
-						ok := call(mr.AvailableWorkers[i], "Worker.DoJob", args, &reply)
+					// if RPC fails, log failed job num & index of failed worker
+					if ok == false {
+						fmt.Printf("Map: RPC %s map error\n", info.address)
+					}
+					go func(msg string) { mr.jobChannel <- msg }(info.address)
 
-						if ok == false {
-							fmt.Printf("Map: RPC %s map error\n", mr.AvailableWorkers[i])
-						}
+				}(mapJob,workerInfo)
+				mapJob+=1
+				
+			} else if reduceJob < mr.nReduce {
+				go func (jobId int, worker *WorkerInfo){
+					// send RPC to job to do 
+					var reply DoJobReply
+					info := *worker
+					
+					args := DoJobArgs{mr.file, Reduce, jobId, mr.nMap }
 
-						c <- 1
-					}(i,mapJob,c)
-				}
-				for i := 0; i < jobs; i++ {
-					<-c    // wait for one task to complete
-				}
-				mapJob += jobs
-			} else if reduceJob < mr.nReduce-1 && len(mr.AvailableWorkers) >0 {
-				jobs := min(mr.nReduce - reduceJob, len(mr.AvailableWorkers))
-				c := make(chan int, jobs)
-				for i :=0; i < jobs ; i++ {
-					go func(i int, startingJob int,c chan int){
-						// send RPC to job to do 
-						var reply DoJobReply
+					ok := call(info.address, "Worker.DoJob", args, &reply)
 
-						args := DoJobArgs{mr.file, Reduce, i + startingJob, mr.nMap }
+					// if RPC fails, log failed job num & index of failed worker
+					if ok == false {
+						fmt.Printf("Reduce: RPC %s reduce error\n", info.address)
+					}
+					go func(msg string) { mr.jobChannel <- msg }(info.address)
 
-						ok := call(mr.AvailableWorkers[i], "Worker.DoJob", args, &reply)
-
-						if ok == false {
-							fmt.Printf("Reduce: RPC %s reduce error\n", mr.AvailableWorkers[i])
-						}
-						c <- 1
-					}(i, reduceJob,c)
-				}
-				for i := 0; i < jobs; i++ {
-					<-c    // wait for one task to complete
-				}
-				reduceJob += jobs
+				}(reduceJob,workerInfo)
+				reduceJob+=1
 			} else {
 				return mr.KillWorkers()
 			}
+		default:
+			fmt.Printf("")
 		}
+
 	}
 	
 }
